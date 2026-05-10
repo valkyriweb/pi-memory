@@ -17,7 +17,8 @@
  *   memory_search  — search across all memory files via qmd (keyword, semantic, or deep)
  *
  * Context injection:
- *   - MEMORY.md + SCRATCHPAD.md + today's + yesterday's daily logs injected into every turn
+ *   - MEMORY.md + SCRATCHPAD.md + today's + yesterday's daily logs injected once at session start
+ *   - Subsequent turns must not mutate systemPrompt (prompt-cache safe); use memory_search/tooling instead
  */
 
 import { execFile } from "node:child_process";
@@ -599,6 +600,7 @@ let qmdAvailable = false;
 let updateTimer: ReturnType<typeof setTimeout> | null = null;
 let exitSummaryReason: ExitSummaryReason | null = null;
 let terminalInputUnsubscribe: (() => void) | null = null;
+let baseMemoryInjectedThisSession = false;
 
 /** Override execFile implementation (for testing). */
 export function _setExecFileForTest(fn: ExecFileFn) {
@@ -869,9 +871,12 @@ export function runQmdSearch(
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
+	baseMemoryInjectedThisSession = false;
+
 	// --- session_start: detect qmd, auto-setup collection ---
 	pi.on("session_start", async (_event, ctx) => {
 		exitSummaryReason = null;
+		baseMemoryInjectedThisSession = false;
 		if (terminalInputUnsubscribe) {
 			terminalInputUnsubscribe();
 			terminalInputUnsubscribe = null;
@@ -952,8 +957,11 @@ export default function (pi: ExtensionAPI) {
 		return { action: "continue" };
 	});
 
-	// --- Inject memory context before every agent turn ---
+	// --- Inject base memory context once, on the first agent turn only ---
 	pi.on("before_agent_start", async (event, _ctx) => {
+		if (baseMemoryInjectedThisSession) return;
+		baseMemoryInjectedThisSession = true;
+
 		const skipSearch = process.env.PI_MEMORY_NO_SEARCH === "1";
 		const searchResults = skipSearch ? "" : await searchRelevantMemories(event.prompt ?? "");
 		const memoryContext = buildMemoryContext(searchResults);

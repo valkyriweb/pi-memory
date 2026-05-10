@@ -979,7 +979,7 @@ describe("lifecycle hooks", () => {
 		expect(result).toBeUndefined();
 	});
 
-	test("before_agent_start injects memory into system prompt", async () => {
+	test("before_agent_start injects memory into system prompt on first turn only", async () => {
 		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "Remember this", "utf-8");
 		const event = { systemPrompt: "base prompt" };
 		const result = await hooks.before_agent_start(event, {});
@@ -987,6 +987,9 @@ describe("lifecycle hooks", () => {
 		expect(result.systemPrompt).toContain("base prompt");
 		expect(result.systemPrompt).toContain("Remember this");
 		expect(result.systemPrompt).toContain("## Memory");
+
+		const second = await hooks.before_agent_start(event, {});
+		expect(second).toBeUndefined();
 	});
 
 	test("before_agent_start includes usage instructions", async () => {
@@ -996,6 +999,18 @@ describe("lifecycle hooks", () => {
 		expect(result.systemPrompt).toContain("memory_write");
 		expect(result.systemPrompt).toContain("memory_search");
 		expect(result.systemPrompt).toContain("scratchpad");
+	});
+
+	test("session_start resets first-turn system prompt injection", async () => {
+		fs.writeFileSync(path.join(tmpDir, "MEMORY.md"), "Remember across sessions", "utf-8");
+		const event = { systemPrompt: "base prompt" };
+		expect(await hooks.before_agent_start(event, {})).toBeDefined();
+		expect(await hooks.before_agent_start(event, {})).toBeUndefined();
+
+		await hooks.session_start({}, { ...createMockCtx(), hasUI: false });
+		const afterNewSession = await hooks.before_agent_start(event, {});
+		expect(afterNewSession).toBeDefined();
+		expect(afterNewSession.systemPrompt).toContain("Remember across sessions");
 	});
 
 	// -- session_shutdown --
