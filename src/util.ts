@@ -86,17 +86,8 @@ function memVars(slug: string, originSessionId: string): Record<string, string> 
 	return { PROJECT_SLUG: slug, ORIGIN_SESSION_ID: originSessionId, MEMORY_ROOT: memoryRoot(), PROFILE_DIR: profileDir(), PROJECT_DIR: projectDir(slug) };
 }
 export function buildSavePromptSection(slug: string, originSessionId: string): string {
-	return [
-		"# Memory",
-		"",
-		`You have a persistent memory system rooted at \`${memoryRoot()}/\`.`,
-		"",
-		loadPrompt("types-individual.md"),
-		"",
-		loadPrompt("what-not-to-save.md"),
-		"",
-		fill(loadPrompt("save-instructions.md"), memVars(slug, originSessionId)),
-	].join("\n");
+	const parts = [`# Memory\n\nYou have a persistent memory system rooted at \`${memoryRoot()}/\`.`, loadPrompt("types-individual.md"), loadPrompt("what-not-to-save.md"), fill(loadPrompt("save-instructions.md"), memVars(slug, originSessionId))];
+	return parts.join("\n\n");
 }
 export function buildExtractPrompt(o: { newMessageCount: number; existingMemories: string; slug: string; originSessionId: string }): string {
 	const block = o.existingMemories.trim()
@@ -132,8 +123,7 @@ export function isSubstantive(s: JournalState): boolean {
 	return t >= 1;
 }
 const trim1 = (s: string | undefined, max = 200): string => {
-	if (!s) return "";
-	const f = s.replace(/\s+/g, " ").trim();
+	const f = (s ?? "").replace(/\s+/g, " ").trim();
 	return f.length > max ? `${f.slice(0, max - 1)}…` : f;
 };
 export function renderJournalEntry(s: JournalState, i: { sessionId: string; slug: string; now?: Date }): string {
@@ -160,23 +150,6 @@ export function appendJournal(entry: string, now: Date = new Date()): string {
 	return file;
 }
 
-/** True if any assistant message after `cursorTs` writes/edits a memory path. */
-export function hasMemoryWritesSince(messages: AgentMessage[], cursorTs: number | undefined): boolean {
-	const root = memoryRoot();
-	for (const m of messages) {
-		if (m.role !== "assistant") continue;
-		if (cursorTs !== undefined && m.timestamp <= cursorTs) continue;
-		const content = (m as { content?: unknown }).content;
-		if (!Array.isArray(content)) continue;
-		for (const block of content) {
-			const b = block as { type?: string; name?: string; arguments?: Record<string, unknown> } | null;
-			if (!b || b.type !== "toolCall" || (b.name !== "write" && b.name !== "edit")) continue;
-			const fp = b.arguments?.file_path ?? b.arguments?.path;
-			if (typeof fp === "string" && fp.startsWith(root)) return true;
-		}
-	}
-	return false;
-}
 function snapshot(slug: string): Map<string, number> {
 	const out = new Map<string, number>();
 	const walk = (d: string, left: number): void => {
@@ -194,38 +167,49 @@ function snapshot(slug: string): Map<string, number> {
 	walk(projectDir(slug), 2);
 	return out;
 }
-function countSince(messages: AgentMessage[], cursorTs: number | undefined): number {
-	let n = 0;
-	for (const m of messages) {
-		if ((m.role === "user" || m.role === "assistant") && (cursorTs === undefined || m.timestamp > cursorTs)) n++;
-	}
-	return n;
-}
 export interface Extractor {
 	maybeRun(force: boolean): Promise<string[]>;
 	drain(timeoutMs?: number): Promise<void>;
 }
 const ALLOWED_FORK_TOOLS = ["read", "grep", "find", "ls", "bash", "write", "edit"];
 
-export function createExtractor(ctx: ExtensionContext, opts: { slug: string; originSessionId: string; getMessages: () => AgentMessage[]; model?: string }): Extractor {
-	let cursorTs: number | undefined;
+// Min new turns since the last fork run before a non-forced fork is worth running.
+// Trivial follow-ups burn ~30k tokens otherwise.
+const MIN_NEW_TURNS_FOR_FORK = 3;
+
+export function createExtractor(
+	ctx: ExtensionContext,
+	opts: {
+		slug: string;
+		originSessionId: string;
+		/** Total user+assistant turns observed by the parent so far. */
+		getTurnCount: () => number;
+		/** Session-wide flag flipped by the tool_result watcher when a memory write
+		 * lands. Acts as the Path A↔Path B mutex — once Path A writes, Path B stops
+		 * firing for the rest of the session. */
+		memoryWrittenThisSession: () => boolean;
+		model?: string;
+	},
+): Extractor {
+	let cursorTurns = 0;
 	let cur: Promise<string[]> | null = null;
 	let next: { force: boolean } | null = null;
 
 	async function runOnce(force: boolean): Promise<string[]> {
-		const messages = opts.getMessages();
-		if (hasMemoryWritesSince(messages, cursorTs)) {
-			cursorTs = messages.at(-1)?.timestamp ?? cursorTs;
+		const turnsNow = opts.getTurnCount();
+		// Mutex: once the main agent has written memory this session, Path B is
+		// redundant. Skip and let the cursor stay where it is.
+		if (opts.memoryWrittenThisSession()) {
+			cursorTurns = turnsNow;
 			return [];
 		}
-		const lastTs = messages.at(-1)?.timestamp;
-		const newCount = countSince(messages, cursorTs);
-		if (newCount < 1 && !force) return [];
+		const newTurns = turnsNow - cursorTurns;
+		if (!force && newTurns < MIN_NEW_TURNS_FOR_FORK) return [];
 		const before = snapshot(opts.slug);
 		try {
 			const { handle } = await ctx.forkAgent({
 				prompt: buildExtractPrompt({
-					newMessageCount: Math.max(newCount, 1),
+					newMessageCount: Math.max(newTurns, 1),
 					existingMemories: [...before.keys()].map((f) => `- ${f}`).join("\n"),
 					slug: opts.slug,
 					originSessionId: opts.originSessionId,
@@ -235,7 +219,7 @@ export function createExtractor(ctx: ExtensionContext, opts: { slug: string; ori
 				description: "pi-memory extraction",
 			});
 			await handle.wait();
-			if (lastTs !== undefined) cursorTs = lastTs;
+			cursorTurns = turnsNow;
 			const after = snapshot(opts.slug);
 			const changed: string[] = [];
 			for (const [p, t] of after) if (before.get(p) !== t) changed.push(p);

@@ -14,21 +14,18 @@ const TMP_ROOT = mkdtempSync(join(tmpdir(), "pi-memory-test-"));
 process.env.PI_MEMORY_DIR = join(TMP_ROOT, "memory");
 process.env.PI_JOURNAL_DIR = join(TMP_ROOT, "journal");
 
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import { appendJournal, buildSavePromptSection, detectPriorityBump, hasMemoryWritesSince, isMemoryPath, isSubstantive, memoryRoot, newJournalState, renderJournalEntry } from "../src/util.js";
-
-function userMsg(text: string, ts: number): AgentMessage {
-	return { role: "user", content: text, timestamp: ts } as unknown as AgentMessage;
-}
-
-function assistantToolCall(name: string, args: Record<string, unknown>, ts: number): AgentMessage {
-	return {
-		role: "assistant",
-		content: [{ type: "toolCall", id: "tc", name, arguments: args }],
-		timestamp: ts,
-		model: "x",
-	} as unknown as AgentMessage;
-}
+import {
+	appendJournal,
+	buildSavePromptSection,
+	createExtractor,
+	detectPriorityBump,
+	type ExtensionContext,
+	isMemoryPath,
+	isSubstantive,
+	memoryRoot,
+	newJournalState,
+	renderJournalEntry,
+} from "../src/util.js";
 
 describe("paths", () => {
 	test("isMemoryPath identifies files under memoryRoot", () => {
@@ -69,27 +66,42 @@ describe("priority-bump detector", () => {
 	});
 });
 
-describe("hasMemoryWritesSince (mutex cursor)", () => {
-	test("returns true when a write to memory path exists after cursor", () => {
-		const memPath = join(memoryRoot(), "profile", "user_foo.md");
-		const msgs = [userMsg("hello", 100), assistantToolCall("write", { file_path: memPath, content: "x" }, 200)];
-		expect(hasMemoryWritesSince(msgs, undefined)).toBe(true);
-		expect(hasMemoryWritesSince(msgs, 50)).toBe(true);
+describe("extractor mutex + throttle", () => {
+	function stubCtx(): ExtensionContext {
+		return {
+			forkAgent: async () => {
+				throw new Error("forkAgent should not be called in this test");
+			},
+			transcript: { append: () => {} },
+		} as unknown as ExtensionContext;
+	}
+	test("memoryWrittenThisSession=true short-circuits without calling forkAgent", async () => {
+		let turns = 10;
+		let wrote = true;
+		const ex = createExtractor(stubCtx(), {
+			slug: "t",
+			originSessionId: "sid",
+			getTurnCount: () => turns,
+			memoryWrittenThisSession: () => wrote,
+		});
+		expect(await ex.maybeRun(false)).toEqual([]);
+		expect(await ex.maybeRun(true)).toEqual([]); // even force=true is skipped after a write
+		wrote = false;
+		turns = 1;
+		// below MIN_NEW_TURNS_FOR_FORK and not forced — skip without fork.
+		expect(await ex.maybeRun(false)).toEqual([]);
 	});
-	test("returns false when write target is outside memory dir", () => {
-		const msgs = [userMsg("hello", 100), assistantToolCall("write", { file_path: "/tmp/random.md", content: "x" }, 200)];
-		expect(hasMemoryWritesSince(msgs, undefined)).toBe(false);
-	});
-	test("returns false when memory write is BEFORE the cursor", () => {
-		const memPath = join(memoryRoot(), "profile", "user_foo.md");
-		const msgs = [assistantToolCall("write", { file_path: memPath, content: "x" }, 100), userMsg("next prompt", 200)];
-		// cursor at ts=150 — write@100 is before cursor, ignored.
-		expect(hasMemoryWritesSince(msgs, 150)).toBe(false);
-	});
-	test("edit on memory path also counts", () => {
-		const memPath = join(memoryRoot(), "project", "slug", "feedback_x.md");
-		const msgs = [assistantToolCall("edit", { path: memPath }, 200)];
-		expect(hasMemoryWritesSince(msgs, undefined)).toBe(true);
+	test("insufficient new turns skips fork unless forced", async () => {
+		let turns = 1;
+		const ex = createExtractor(stubCtx(), {
+			slug: "t",
+			originSessionId: "sid",
+			getTurnCount: () => turns,
+			memoryWrittenThisSession: () => false,
+		});
+		expect(await ex.maybeRun(false)).toEqual([]);
+		turns = 2;
+		expect(await ex.maybeRun(false)).toEqual([]);
 	});
 });
 

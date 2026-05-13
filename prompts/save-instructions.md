@@ -15,7 +15,13 @@ originSessionId: {{ORIGIN_SESSION_ID}}
 {{memory content — for feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines}}
 ```
 
-Filename convention: `<type>_<slug>.md` (e.g. `user_role.md`, `feedback_no_db_mocks.md`, `project_v53_externalised_plugins.md`).
+**Filename convention is strict: `<type>_<slug>.md`.** The `<type>` prefix must be one of `user`, `feedback`, `project`, `reference` and MUST match the `type:` frontmatter field exactly. Examples:
+- `user_dark_mode.md` (not `dark_mode.md`)
+- `feedback_no_db_mocks.md`
+- `project_v53_externalised_plugins.md`
+- `reference_payments_api.md`
+
+If you are writing a memory of type `user`, the filename MUST start with `user_`. Never drop the prefix.
 
 **Step 2** — append a one-line pointer to the appropriate `MEMORY.md` index:
 

@@ -8,7 +8,7 @@ Prompt-driven memory extension for the [pi coding-agent](https://github.com/mari
 
 1. **Injects save instructions** into the main agent's system prompt: type taxonomy (`user | feedback | project | reference`), the "what NOT to save" list, frontmatter shape, and the two-step write protocol (typed file + `MEMORY.md` index entry). Verbatim from claude-code's `memoryTypes.ts`, with one pi-specific adaptation (the "already documented in CLAUDE.md" bullet is broadened to `MEMORY.md`, `AGENTS.md`, `CLAUDE.md`, or skill files).
 2. **Watches `write`/`edit` to memory paths** and emits inline `memory_saved` transcript entries so writes are visible: `● Saved 1 memory` / `● Improved 2 memories`.
-3. **Path B background extraction** — at every `turn_end`, if the main agent did NOT inline-save, calls `ctx.forkAgent()` with a restricted-tool extraction prompt. Coalesces concurrent triggers, drains in-flight forks on shutdown with a 60 s timeout.
+3. **Path B background extraction** — at every `turn_end`, if the main agent did NOT inline-save AND no memory write has happened this session (session-wide mutex), calls `ctx.forkAgent()` with a restricted-tool extraction prompt. Throttled: a non-forced fork only runs when ≥3 new turns have passed since the last attempt (trivial follow-ups are silent). Coalesces concurrent triggers, drains in-flight forks on shutdown with a 60 s timeout.
 4. **Priority-bump detector** — `remember`, `note that`, `for next time`, `no`, `stop doing`, `actually`, `yes exactly`, `perfect`, `keep doing`, … force Path B to fire on the next `turn_end` regardless of throttle.
 5. **Structured shutdown journal** at `~/.pi/agent/journal/YYYY-MM-DD.md` — deterministic markdown entry with cwd, message counts, tool histogram, top file edits, first user prompt, last assistant text. **No LLM in the path** — no `None.` blocks possible by construction.
    - Gated: ≥2 user messages OR ≥1 tool call.
@@ -45,9 +45,9 @@ Project slug resolution: `.dream-memory.yml`'s `project_slug:` → git remote or
 
 ```
 pi-memory/
-├── index.ts             # extension factory + hook wiring (118 LOC)
+├── index.ts             # extension factory + hook wiring (123 LOC)
 ├── src/
-│   └── util.ts          # paths, slug, triggers, prompt comp, journal, Path B, type shim (281 LOC)
+│   └── util.ts          # paths, slug, triggers, prompt comp, journal, Path B, type shim (274 LOC)
 ├── prompts/             # verbatim text from claude-code memdir
 │   ├── types-individual.md
 │   ├── what-not-to-save.md

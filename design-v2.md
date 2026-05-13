@@ -474,6 +474,35 @@ step (2) handles the data; the rewrite step (4) handles the code.
 - **`SessionShutdownEvent.reason`** is not yet in the installed dist; the
   reload-skip check uses a `(event as { reason?: string }).reason` cast.
   Drop once the new event shape ships in the published package.
+- **Path-B mutex moved from message-scan to session-wide boolean.** The
+  original design called for a cursor of the last processed message id with
+  per-turn scanning of assistant content blocks for write/edit toolCalls
+  under `MEMORY_ROOT`. In practice the live `AgentMessage` content shape on
+  `turn_end` events did not match the JSONL `toolCall` block shape, so the
+  scan returned false even after Path A had written, causing Path B to fork
+  on every subsequent turn (~30k tokens each, plus an unbounded `messages`
+  array → OOM after ~100 turns). v2 instead uses the
+  `journal.memoryWrittenThisSession` flag set by the `tool_result` hook,
+  which is a known-good signal: once any write/edit lands under
+  `MEMORY_ROOT`, Path B is muted for the rest of the session. Coarser than
+  the cursor design but reliable and trivially testable.
+- **Path-B “≥3 new turns” throttle.** Without a throttle, Path B fired on
+  every `turn_end` including trivial acknowledgements (“thanks”, “ok”),
+  burning a fork run each time. v2 requires `≥3` new user+assistant turns
+  since the last fork attempt before a non-forced fork runs (priority-bump
+  still forces). Constant lives at the top of the extractor module.
+- **No `messages[]` retention in the extension.** Originally the extension
+  held `AgentMessage[]` to compute cursor + new-message counts. Tool results
+  on long sessions with large background-agent payloads bloated the array
+  to GB scale. v2 only keeps a plain integer turn counter; pi already keeps
+  full history internally.
+- **Background-agent completion notifications spam the transcript for
+  extension-initiated forks.** `_forkAgentFromExtension` in pi-mono-fork
+  wires `onBackgroundTerminal → _emitAgentCompletion`, which sends a
+  `<agent_completion>` followUp message into the transcript. Extensions
+  awaiting `handle.wait()` don't need this. Upstream fix candidate: skip
+  the notification (or expose `silent?: boolean` on `ForkAgentOptions`)
+  when the run was launched via `ctx.forkAgent()`.
 
 ---
 

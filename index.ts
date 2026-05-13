@@ -1,4 +1,3 @@
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
 	appendJournal,
@@ -20,7 +19,10 @@ export default function piMemoryExtension(pi: ExtensionAPI): void {
 	let originSessionId = "";
 	let injectedSection = "";
 	const journal = newJournalState();
-	const messages: AgentMessage[] = [];
+	// Turn counter for Path B cursor. We deliberately do NOT retain the full
+	// AgentMessage[] history — pi already keeps it, and storing it here grew the
+	// process to OOM on long sessions with large tool-result payloads.
+	let turnCount = 0;
 	let extractor: Extractor | undefined;
 	let priorityBumpPending = false;
 	const writesThisTurn = new Map<string, "write" | "edit">();
@@ -43,6 +45,7 @@ export default function piMemoryExtension(pi: ExtensionAPI): void {
 	pi.on("input", (event) => {
 		if (event.source === "interactive" || event.source === "rpc") {
 			journal.userMsgCount++;
+			turnCount++;
 			if (!journal.firstUser) journal.firstUser = event.text;
 			if (detectPriorityBump(event.text)) priorityBumpPending = true;
 		}
@@ -73,8 +76,7 @@ export default function piMemoryExtension(pi: ExtensionAPI): void {
 	pi.on("turn_end", async (event, baseCtx) => {
 		const ctx = baseCtx as ExtensionContext;
 		journal.assistantMsgCount++;
-		messages.push(event.message);
-		for (const r of event.toolResults) messages.push(r);
+		turnCount++;
 		const c = (event.message as { content?: unknown }).content;
 		if (event.message.role === "assistant" && Array.isArray(c)) {
 			const t = c.find((b) => b && typeof b === "object" && (b as { type?: string }).type === "text") as { text?: unknown } | undefined;
@@ -90,14 +92,26 @@ export default function piMemoryExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		if (!extractor) extractor = createExtractor(ctx, { slug, originSessionId, getMessages: () => messages.slice() });
+		if (!extractor) {
+			extractor = createExtractor(ctx, {
+				slug,
+				originSessionId,
+				getTurnCount: () => turnCount,
+				memoryWrittenThisSession: () => journal.memoryWrittenThisSession,
+			});
+		}
 		const force = priorityBumpPending;
 		priorityBumpPending = false;
-		const saved = await extractor.maybeRun(force);
-		if (saved.length > 0) {
-			ctx.transcript.append({ kind: "memory_saved", verb: "Saved", paths: saved });
-			journal.memoryWrittenThisSession = true;
-		}
+		// Fire-and-forget: awaiting here blocks the parent's turn on a 6-30s extraction.
+		// transcript.append is push-based; drain() on session_shutdown catches in-flight forks.
+		void extractor.maybeRun(force).then(
+			(saved) => {
+				if (saved.length === 0) return;
+				ctx.transcript.append({ kind: "memory_saved", verb: "Saved", paths: saved });
+				journal.memoryWrittenThisSession = true;
+			},
+			(err) => console.error("[pi-memory] background extraction failed:", err),
+		);
 	});
 
 	pi.on("session_shutdown", async (event, baseCtx) => {
