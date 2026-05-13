@@ -436,6 +436,45 @@ step (2) handles the data; the rewrite step (4) handles the code.
 - **`originSessionId` privacy** — UUIDs are fine for self-use; if these
   files ever sync to a team setup, may want to redact.
 
+### Surfaced during v2 implementation (2026-05-13)
+
+- **Forked-agent write-path predicate is prompt-only, not enforced.**
+  Claude-code enforces "only write under `~/.pi/agent/memory/`" inside the
+  forked subagent via `canUseTool` returning `behavior: deny` for non-memory
+  paths (`createAutoMemCanUseTool` in extractMemories.ts). Pi's
+  `ctx.forkAgent({ allowedTools })` accepts a tool **name** allowlist but
+  has no per-call path predicate hook on the child. A parent-side `tool_call`
+  handler can't distinguish child-fork tool calls from parent tool calls
+  cleanly. **For v2 the path restriction lives only in the extraction prompt
+  text** ("only write under `${MEMORY_ROOT}/`"). Acceptable risk: the fork
+  uses the same model + system prompt as the parent and is constrained by
+  the extraction prompt to a two-turn read/write budget; we have not seen
+  a fork wander outside the memory dir. A future pi extension to forkAgent
+  (e.g. `canUseTool?: (tool, input) → boolean | { deny: string }`) would
+  make this enforceable.
+- **Published `@mariozechner/pi-coding-agent` dist lacks `ctx.forkAgent`
+  and `ctx.transcript.append` at time of v2 implementation.** The new APIs
+  exist in `~/Projects/personal/pi-mono-fork` (the upstream fork) but the
+  npm dist used as a peerDep does not yet ship them. v2 carries a tiny
+  `ExtensionContext` shim in `src/util.ts` that extends `BaseCtx` with the
+  new methods so typecheck passes against the installed dist; the runtime
+  needs the upstream pi to actually function. Drop the shim once the
+  published package ships the upstream PR.
+- **Path B “memory file paths” are detected by mtime-snapshot diff**
+  rather than by mining the fork's terminal `AgentToolDetails`. The
+  details shape is internal and we don't have a stable accessor for the
+  child's tool-use blocks; an mtime/size snapshot of `profile/` +
+  `project/<slug>/` before/after `handle.wait()` is simpler and robust. If
+  the upstream PR later exposes `result.messages` with tool-use details,
+  swap to a direct mine.
+- **Slug resolution is vendored, not imported.** Live import from
+  `dream-memory-harness/src/store.ts` would couple pi-memory to dream’s
+  internal API. Vendored a 30-line subset with a `TODO` to extract both
+  callers to a shared `@howaboua/pi-slug` package.
+- **`SessionShutdownEvent.reason`** is not yet in the installed dist; the
+  reload-skip check uses a `(event as { reason?: string }).reason` cast.
+  Drop once the new event shape ships in the published package.
+
 ---
 
 ## References

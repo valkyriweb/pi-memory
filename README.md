@@ -1,221 +1,113 @@
-# pi-memory
+# pi-memory v2
 
-Memory extension for [pi](https://github.com/mariozechner/pi-mono) with semantic search powered by [qmd](https://github.com/tobi/qmd).
+Prompt-driven memory extension for the [pi coding-agent](https://github.com/mariozechner/pi-coding-agent), modelled after Anthropic Claude Code's `memdir` design.
 
-Thanks to https://github.com/skyfallsin/pi-mem for inspiration.
+**v2 is a clean replacement for v1.** v1 was ~1500 LOC of memory-specific tools (`memory_write`, `memory_read`, `scratchpad`), daily-log injection, qmd recall, and an LLM-driven shutdown summariser. v2 is ~400 LOC of pure extension wiring — there are no memory tools at all.
 
-Persistent memory across coding sessions — long-term facts, daily logs, and a scratchpad checklist. Core memory works as plain markdown files. Optional qmd integration adds keyword, semantic, and hybrid search across all memory files, plus automatic selective injection of relevant past memories into every turn.
+## What it does
 
-## Installation
+1. **Injects save instructions** into the main agent's system prompt: type taxonomy (`user | feedback | project | reference`), the "what NOT to save" list, frontmatter shape, and the two-step write protocol (typed file + `MEMORY.md` index entry). Verbatim from claude-code's `memoryTypes.ts`, with one pi-specific adaptation (the "already documented in CLAUDE.md" bullet is broadened to `MEMORY.md`, `AGENTS.md`, `CLAUDE.md`, or skill files).
+2. **Watches `write`/`edit` to memory paths** and emits inline `memory_saved` transcript entries so writes are visible: `● Saved 1 memory` / `● Improved 2 memories`.
+3. **Path B background extraction** — at every `turn_end`, if the main agent did NOT inline-save, calls `ctx.forkAgent()` with a restricted-tool extraction prompt. Coalesces concurrent triggers, drains in-flight forks on shutdown with a 60 s timeout.
+4. **Priority-bump detector** — `remember`, `note that`, `for next time`, `no`, `stop doing`, `actually`, `yes exactly`, `perfect`, `keep doing`, … force Path B to fire on the next `turn_end` regardless of throttle.
+5. **Structured shutdown journal** at `~/.pi/agent/journal/YYYY-MM-DD.md` — deterministic markdown entry with cwd, message counts, tool histogram, top file edits, first user prompt, last assistant text. **No LLM in the path** — no `None.` blocks possible by construction.
+   - Gated: ≥2 user messages OR ≥1 tool call.
+   - Skipped when any memory write happened this session (mutex with Path A/B).
+   - Skipped on `session_shutdown` `reason: "reload"` to avoid duplicate entries on `/reload`.
+
+## What it explicitly does NOT do
+
+- No `memory_write`, `memory_read`, or `scratchpad` tools. None of v1's tools exist. **Zero tool registrations.**
+- No daily-log auto-injection.
+- No qmd-backed recall — that's [dream-memory-harness](https://github.com/.../dream-memory-harness)'s `active-memory` job.
+- No `session_before_compact` handoff writer (pi's compactor owns that).
+- No `MEMORY.md` reconciliation loop — index drift is accepted, claude-code does the same.
+
+## Layout
+
+```
+~/.pi/agent/
+├── memory/
+│   ├── profile/                  # cross-project, user-level memories
+│   │   ├── MEMORY.md             # one-line index
+│   │   └── <type>_<slug>.md      # typed: user|feedback|project|reference
+│   ├── project/<project-slug>/   # per-project memories (slug from resolveProjectSlug)
+│   │   ├── MEMORY.md
+│   │   └── <type>_<slug>.md
+│   └── inbox/                    # dream-only (excluded from live recall)
+└── journal/
+    └── YYYY-MM-DD.md             # structured shutdown journal
+```
+
+Project slug resolution: `.dream-memory.yml`'s `project_slug:` → git remote origin → cwd basename. Vendored from `dream-memory-harness/src/store.ts`.
+
+## Architecture
+
+```
+pi-memory/
+├── index.ts             # extension factory + hook wiring (118 LOC)
+├── src/
+│   └── util.ts          # paths, slug, triggers, prompt comp, journal, Path B, type shim (281 LOC)
+├── prompts/             # verbatim text from claude-code memdir
+│   ├── types-individual.md
+│   ├── what-not-to-save.md
+│   ├── save-instructions.md
+│   └── extract-prompt.md
+└── test/
+    ├── unit.test.ts     # bun:test
+    └── e2e.ts           # mock-API integration
+```
+
+The prompt `.md` files are loaded with `readFileSync` at runtime and **kept verbatim** from claude-code (one pi-specific bullet adaptation noted above). They contribute zero to the `.ts` LOC budget.
+
+## Install
 
 ```bash
-# Install from npm (recommended)
-pi install npm:pi-memory
-
-# Install from local checkout
-pi install ./pi-memory
-
-# Optional (enables `memory_search` + selective injection, requires Bun)
-command -v qmd >/dev/null 2>&1 || bun install -g https://github.com/tobi/qmd
+git clone https://github.com/jayzeng/pi-memory ~/.pi/agent/extensions/pi-memory
+cd ~/.pi/agent/extensions/pi-memory
+npm install
 ```
 
-Or copy to your extensions directory:
+Then enable in `~/.pi/agent/settings.json`:
+
+```json
+{
+  "extensions": ["~/.pi/agent/extensions/pi-memory/index.ts"]
+}
+```
+
+## Develop
 
 ```bash
-cp -r pi-memory ~/.pi/agent/extensions/pi-memory
+npm run lint          # biome check .
+npx tsc --noEmit      # typecheck
+npm run test:unit     # bun test test/unit.test.ts
+npm run test:e2e      # npx tsx test/e2e.ts
+npm test              # both
 ```
 
-### Optional: Enable search with qmd
+LOC budget: total `.ts` source kept under 400.
 
-When qmd is installed, the extension **automatically creates** the `pi-memory` collection and path contexts on first session start.
+## Environment
 
-Note: `memory_search` **semantic**/**deep** modes require vector embeddings. If you see a warning like “need embeddings”, run `qmd embed` once and retry.
+- `PI_MEMORY_DIR` — override `~/.pi/agent/memory`.
+- `PI_JOURNAL_DIR` — override `~/.pi/agent/journal`.
+- `PI_MEMORY_EXTRACTION_MODEL` — (planned) override fork model; inherits parent by default for cache-preservation.
 
-If you prefer manual setup:
+## Upstream dependency
 
-```bash
-qmd collection add ~/.pi/agent/memory --name pi-memory
-qmd context add /daily "Daily append-only work logs organized by date" -c pi-memory
-qmd context add / "Curated long-term memory: decisions, preferences, facts, lessons" -c pi-memory
-qmd embed
-```
+This extension depends on two pi-mono-fork APIs landed by the v2 PR:
 
-Without qmd, all core tools (write/read/scratchpad) work normally. Only `memory_search` and selective injection require qmd.
+- `ctx.forkAgent({...})` — cache-preserving background subagent.
+- `ctx.transcript.append({...})` — structured inline transcript entries.
 
-## Tools
+The published `@mariozechner/pi-coding-agent` package does not yet expose these — pi-memory v2 carries a small `ExtensionContext` shim in `src/util.ts` that lets the code typecheck against either world. Once the published package ships these APIs, delete the shim.
 
-| Tool | Description |
-|------|-------------|
-| `memory_write` | Write to MEMORY.md (long-term) or daily log |
-| `memory_read` | Read any memory file or list daily logs |
-| `scratchpad` | Add/done/undo/clear/list checklist items |
-| `memory_search` | Search across all memory files (requires qmd) |
+## Why v2
 
-### memory_search modes
+See `design-v2.md` for the full rationale. Two failure modes in v1:
 
-| Mode | Speed | Method | Best for |
-|------|-------|--------|----------|
-| `keyword` | ~30ms | BM25 | Specific terms, dates, names, #tags, [[links]] |
-| `semantic` | ~2s | Vector search | Related concepts, different wording |
-| `deep` | ~10s | Hybrid + reranking | When other modes miss |
+1. **Daily-log noise.** Trivial sessions produced four `None.` sections; near-duplicate HANDOFF blocks crowded recall.
+2. **No active recall.** Blanket injection of `MEMORY.md` + today's + yesterday's tails on every turn.
 
-If the first search doesn't find what you need, try rephrasing or switching modes.
-
-## File layout
-
-```
-~/.pi/agent/memory/
-  MEMORY.md              # Curated long-term memory
-  SCRATCHPAD.md           # Checklist of things to fix/remember
-  daily/
-    2026-02-15.md         # Daily append-only log
-    2026-02-14.md
-    ...
-```
-
-## How it works
-
-### Context injection
-
-Before every agent turn, the following are injected into the system prompt (in priority order):
-
-1. **Open scratchpad items** (up to 2K chars)
-2. **Today's daily log** (up to 3K chars, tail)
-3. **Relevant memories via qmd search** (up to 2.5K chars) — searches using the user's current prompt to surface related past context
-4. **MEMORY.md** (up to 4K chars, middle-truncated)
-5. **Yesterday's daily log** (up to 3K chars, tail — lowest priority, trimmed first)
-
-Total injection is capped at 16K chars. When qmd is unavailable, step 3 is skipped and the rest works as before.
-
-### Selective injection
-
-When qmd is available, the extension automatically searches memory using the user's prompt before each turn. The top 3 keyword results are injected alongside the standard context. This surfaces relevant past decisions, preferences, and notes — even from daily logs older than yesterday — without the agent needing to explicitly call `memory_search`.
-
-The search has a 3-second timeout and fails silently. If qmd is down or the query returns nothing, injection falls back to the standard behavior.
-
-### Tags and links
-
-Use `#tags` and `[[wiki-links]]` in memory content to improve searchability:
-
-```markdown
-#decision [[database-choice]] Chose PostgreSQL for all backend services.
-#preference [[editor]] User prefers Neovim with LazyVim config.
-#lesson [[api-versioning]] URL prefix versioning (/v1/) avoids CDN cache issues.
-```
-
-These are content conventions, not enforced metadata. qmd's full-text indexing makes them searchable for free.
-
-### Session handoff
-
-When the context window compacts, the extension automatically captures a handoff entry in today's daily log:
-
-```markdown
-<!-- HANDOFF 2026-02-15 14:30:00 [a1b2c3d4] -->
-## Session Handoff
-**Open scratchpad items:**
-- [ ] Fix auth bug
-- [ ] Review PR #42
-**Recent daily log context:**
-...last 15 lines of today's log...
-```
-
-This ensures in-progress context survives compaction and is visible in the next turn (via today's daily log injection).
-
-### Other behavior
-
-- **Persistence**: Memory files are plain markdown on disk — readable, editable, and git-friendly.
-- **Tool response previews**: Write/scratchpad tools return size-capped previews instead of full file contents.
-- **qmd auto-setup**: On first session start with qmd available, the extension creates the collection and path contexts automatically.
-- **qmd re-indexing**: After every write, a debounced `qmd update` runs in the background (fire-and-forget, non-blocking) unless disabled via `PI_MEMORY_QMD_UPDATE`.
-- **qmd embeddings**: Semantic/deep search needs vector embeddings. If you see “need embeddings” warnings, run `qmd embed` once and retry.
-- **Graceful degradation**: If qmd is not installed, core tools work fine. `memory_search` returns install instructions.
-
-### Configuration
-
-| Variable | Values | Default | Description |
-|----------|--------|---------|-------------|
-| `PI_MEMORY_QMD_UPDATE` | `background`, `manual`, `off` | `background` | Controls automatic `qmd update` after writes |
-| `PI_MEMORY_NO_SEARCH` | `1` | unset | Disable selective injection (for A/B testing) |
-
-## Running tests
-
-```bash
-# Unit tests (no LLM, no qmd — fast, deterministic)
-bun test/unit.ts
-
-# End-to-end tests (requires pi + API key, optionally qmd)
-bun test/e2e.ts
-
-# Recall effectiveness eval (requires pi + API key + qmd)
-bun test/eval-recall.ts
-
-# Pin provider/model for cheaper eval runs
-PI_E2E_PROVIDER=openai PI_E2E_MODEL=gpt-4o-mini bun test/eval-recall.ts
-
-# Multiple runs for statistical robustness
-EVAL_RUNS=3 bun test/eval-recall.ts
-```
-
-All tests back up and restore existing memory files.
-
-### Test levels
-
-| Level | File | Requirements | What it tests |
-|-------|------|-------------|---------------|
-| Unit | `test/unit.ts` | None | Context builder, truncation, handoff, scratchpad parsing |
-| E2E | `test/e2e.ts` | pi + API key | Tool registration, write/recall, scratchpad lifecycle, search |
-| Eval | `test/eval-recall.ts` | pi + API key + qmd | Recall accuracy with vs without selective injection |
-
-## Development
-
-This is a single-file extension (`index.ts`). No build step required — pi loads TypeScript directly.
-
-```bash
-# Test with pi directly
-pi -p -e ./index.ts "remember: I prefer dark mode"
-
-# Verify memory was written
-cat ~/.pi/agent/memory/MEMORY.md
-```
-
-## Publishing (maintainers)
-
-```bash
-# Confirm package name is available
-npm view pi-memory
-
-# Bump version (choose patch/minor/major)
-npm version patch
-
-# Publish to npm (public)
-npm publish --access public
-
-# Verify install
-pi install npm:pi-memory
-```
-
-## Changelog
-
-### 0.3.6
-
-- Added support for `PI_MEMORY_DIR` so memory storage can be redirected from the default `~/.pi/agent/memory` path.
-- Published npm patch release `0.3.6`.
-
-### 0.2.0
-
-- **Selective injection**: Before each turn, the user's prompt is searched against memory via qmd. Top results are injected into the system prompt alongside standard context, surfacing relevant past decisions without explicit tool calls.
-- **qmd auto-setup**: The extension automatically creates the `pi-memory` collection and path contexts on session start when qmd is available. No manual `qmd collection add` needed.
-- **Tags and links**: `memory_write` and context injection now encourage `#tags` and `[[wiki-links]]` as searchable content conventions.
-- **Session handoff on compaction**: `session_before_compact` automatically writes a handoff entry to today's daily log with open scratchpad items and recent context, preserving in-progress state across context compaction.
-- **Improved memory_search description**: Encourages iterative search (rephrasing, mode-switching) and mentions tags/links in keyword mode.
-- **Context priority reordering**: Injection order is now scratchpad > today > search results > MEMORY.md > yesterday (previously MEMORY.md was first). MEMORY.md budget reduced from 6K to 4K to make room for search results (2.5K).
-- **`PI_MEMORY_NO_SEARCH` env var**: Disable selective injection for A/B testing.
-- **Unit tests**: Added `test/unit.ts` with 18 deterministic tests (no LLM/qmd needed).
-- **Recall eval**: Added `test/eval-recall.ts` for measuring recall effectiveness with/without selective injection.
-
-### 0.1.0
-
-- Initial release: `memory_write`, `memory_read`, `scratchpad`, `memory_search` tools.
-- Context injection of MEMORY.md, scratchpad, and today/yesterday daily logs.
-- qmd integration for keyword, semantic, and hybrid search.
-- Debounced background `qmd update` after writes.
+v2 borrows claude-code's `memdir` design — typed memories, a save-prompt as the gate, mutual exclusion between main-agent saves and a forked background extractor — and removes everything duplicative or noisy.
