@@ -13,6 +13,7 @@ import * as path from "node:path";
 
 import {
 	_clearUpdateTimer,
+	_getQmdCommand,
 	_getUpdateTimer,
 	_resetBaseDir,
 	_resetExecFileForTest,
@@ -21,6 +22,7 @@ import {
 	_setQmdAvailable,
 	buildMemoryContext,
 	dailyPath,
+	detectQmd,
 	ensureDirs,
 	nowTimestamp,
 	parseScratchpad,
@@ -57,17 +59,21 @@ function cleanupTmpDir() {
 function createMockPi() {
 	const tools: Record<string, any> = {};
 	const hooks: Record<string, (...args: unknown[]) => unknown> = {};
+	const messageRenderers: Record<string, any> = {};
 
 	const pi = {
 		registerTool(toolDef: any) {
 			tools[toolDef.name] = toolDef;
+		},
+		registerMessageRenderer(customType: string, renderer: any) {
+			messageRenderers[customType] = renderer;
 		},
 		on(event: string, handler: (...args: unknown[]) => unknown) {
 			hooks[event] = handler;
 		},
 	};
 
-	return { pi, tools, hooks };
+	return { pi, tools, hooks, messageRenderers };
 }
 
 /** Create a mock tool execution context. */
@@ -441,6 +447,33 @@ describe("qmdCollectionInstructions", () => {
 		const instructions = qmdCollectionInstructions();
 		expect(instructions).toContain("qmd collection add");
 		expect(instructions).toContain("qmd embed");
+	});
+});
+
+describe("detectQmd", () => {
+	afterEach(() => {
+		_resetExecFileForTest();
+	});
+
+	test("falls back to a stable bun qmd path when qmd is missing from PATH", async () => {
+		const calls: string[] = [];
+		_setExecFileForTest(((file: string, _args: string[], _options: any, cb: any) => {
+			calls.push(file);
+			cb(file.endsWith("/.bun/bin/qmd") ? null : new Error("ENOENT"), "", "");
+		}) as any);
+
+		expect(await detectQmd()).toBe(true);
+		expect(calls[0]).toBe("qmd");
+		expect(_getQmdCommand()).toContain("/.bun/bin/qmd");
+	});
+
+	test("returns false when no qmd candidate is executable", async () => {
+		_setExecFileForTest(((_file: string, _args: string[], _options: any, cb: any) => {
+			cb(new Error("ENOENT"), "", "");
+		}) as any);
+
+		expect(await detectQmd()).toBe(false);
+		expect(_getQmdCommand()).toBe("qmd");
 	});
 });
 
@@ -940,9 +973,8 @@ describe("memory_search tool", () => {
 	test("defaults mode to keyword and limit to 5", () => {
 		// Verify through the tool's parameter schema description
 		const desc = tools.memory_search.description;
-		expect(desc).toContain("keyword");
-		expect(desc).toContain("semantic");
-		expect(desc).toContain("deep");
+		expect(desc).toContain("compact recall broker");
+		expect(desc).toContain("memory_expand");
 	});
 });
 
@@ -1139,14 +1171,21 @@ describe("lifecycle hooks", () => {
 // ==========================================================================
 
 describe("extension registration", () => {
-	test("registers all 4 tools", () => {
+	test("registers all 5 tools", () => {
 		const mockPi = createMockPi();
 		registerExtension(mockPi.pi as any);
-		expect(Object.keys(mockPi.tools)).toHaveLength(4);
+		expect(Object.keys(mockPi.tools)).toHaveLength(5);
 		expect(mockPi.tools.memory_write).toBeDefined();
 		expect(mockPi.tools.memory_read).toBeDefined();
 		expect(mockPi.tools.scratchpad).toBeDefined();
 		expect(mockPi.tools.memory_search).toBeDefined();
+		expect(mockPi.tools.memory_expand).toBeDefined();
+	});
+
+	test("registers visible memory recall renderer", () => {
+		const mockPi = createMockPi();
+		registerExtension(mockPi.pi as any);
+		expect(mockPi.messageRenderers["pi-memory.recall"]).toBeDefined();
 	});
 
 	test("registers all 4 lifecycle hooks", () => {
@@ -1161,7 +1200,7 @@ describe("extension registration", () => {
 	test("tools have labels and descriptions", () => {
 		const mockPi = createMockPi();
 		registerExtension(mockPi.pi as any);
-		for (const name of ["memory_write", "memory_read", "scratchpad", "memory_search"]) {
+		for (const name of ["memory_write", "memory_read", "scratchpad", "memory_search", "memory_expand"]) {
 			expect(mockPi.tools[name].label).toBeTruthy();
 			expect(mockPi.tools[name].description).toBeTruthy();
 		}

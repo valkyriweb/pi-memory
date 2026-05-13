@@ -23,15 +23,19 @@
 
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { complete, type Message, StringEnum } from "@mariozechner/pi-ai";
 import {
 	convertToLlm,
 	type ExtensionAPI,
 	type ExtensionContext,
+	type MessageRenderOptions,
 	type SessionEntry,
 	serializeConversation,
+	type Theme,
 } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
 // ---------------------------------------------------------------------------
@@ -494,6 +498,70 @@ export function serializeScratchpad(items: ScratchpadItem[]): string {
 	return `${lines.join("\n")}\n`;
 }
 
+// --- memory-agent recall broker integration ---
+
+async function loadRecallBroker(): Promise<any | null> {
+	try {
+		// @ts-ignore broker is a runtime JS module outside this TypeScript package.
+		return await import("/Users/luke/Projects/personal/memory-agent/src/recall-broker.js");
+	} catch {
+		return null;
+	}
+}
+
+function formatRecallBrokerPacket(result: any): string {
+	const packet = Array.isArray(result?.packet) ? result.packet : [];
+	if (packet.length === 0) return "";
+	const lines = [
+		"Compact memory recall packet. Use memory_expand only for refs that need exact wording.",
+		`Provider: ${result.provider ?? "unknown"}`,
+		`Triage model: ${result.triageModel ?? "unknown"}`,
+	];
+	packet.forEach((entry: any, index: number) => {
+		lines.push(
+			"",
+			`### Result ${index + 1}: ${entry.title ?? "Memory hit"}`,
+			`**Kind:** ${entry.kind ?? "memory"}`,
+			`**Relevance:** ${entry.relevance ?? "unknown"}`,
+			`**Source:** ${entry.source}`,
+			`**Why:** ${entry.whyRelevant ?? "nearest available memory hit"}`,
+			"",
+			entry.summary ?? "",
+			"",
+			`Expand: memory_expand(ref: "${entry.source}")`,
+		);
+	});
+	return lines.join("\n");
+}
+
+function renderMemoryRecall(message: { content?: unknown; details?: unknown }, _opts: MessageRenderOptions, theme: Theme): Text {
+	const details = message.details as { source?: string; count?: number; latency_ms?: number } | undefined;
+	const source = details?.source ?? "memory";
+	const count = details?.count !== undefined ? `${details.count} hit${details.count === 1 ? "" : "s"}` : "";
+	const ms = details?.latency_ms !== undefined ? `${details.latency_ms}ms` : "";
+	const stats = [source, count, ms].filter(Boolean).join(" · ");
+	const prefix = `${theme.fg("accent", "memory recall")}${stats ? `  ${theme.fg("dim", stats)}` : ""}`;
+	const body = typeof message.content === "string" ? message.content.trim() : "";
+	return new Text(body ? `${prefix}\n${theme.fg("dim", body)}` : prefix, 0, 0);
+}
+
+async function runRecallBroker(query: string, limit = 5): Promise<string> {
+	const broker = await loadRecallBroker();
+	if (!broker?.recallBroker) return "";
+	const result = broker.recallBroker(query, {
+		memoryRoot: MEMORY_DIR,
+		limit,
+		piSettingsPath: "/Users/luke/.pi/agent/settings.json",
+	});
+	return formatRecallBrokerPacket(result);
+}
+
+async function expandRecallBrokerRef(ref: string): Promise<string | null> {
+	const broker = await loadRecallBroker();
+	if (!broker?.expandRecallRef) return null;
+	return broker.expandRecallRef(ref, { memoryRoot: MEMORY_DIR });
+}
+
 // ---------------------------------------------------------------------------
 // Context builder
 // ---------------------------------------------------------------------------
@@ -597,6 +665,7 @@ type ExecFileFn = typeof execFile;
 let execFileFn: ExecFileFn = execFile;
 
 let qmdAvailable = false;
+let qmdCommand = "qmd";
 let updateTimer: ReturnType<typeof setTimeout> | null = null;
 let exitSummaryReason: ExitSummaryReason | null = null;
 let terminalInputUnsubscribe: (() => void) | null = null;
@@ -610,11 +679,38 @@ export function _setExecFileForTest(fn: ExecFileFn) {
 /** Reset execFile implementation (for testing). */
 export function _resetExecFileForTest() {
 	execFileFn = execFile;
+	qmdCommand = "qmd";
 }
 
 /** Set qmd availability flag (for testing). */
 export function _setQmdAvailable(value: boolean) {
 	qmdAvailable = value;
+}
+
+/** Get the qmd executable selected by detectQmd (for testing/diagnostics). */
+export function _getQmdCommand(): string {
+	return qmdCommand;
+}
+
+function qmdCandidates(): string[] {
+	const home = os.homedir();
+	return ["qmd", path.join(home, ".bun", "bin", "qmd"), path.join(home, ".local", "bin", "qmd")];
+}
+
+function qmdExecutionEnv(): NodeJS.ProcessEnv {
+	const home = os.homedir();
+	const pathEntries = [
+		path.join(home, ".bun", "bin"),
+		path.join(home, ".local", "bin"),
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		process.env.PATH ?? "",
+	].filter(Boolean);
+	return { ...process.env, PATH: pathEntries.join(path.delimiter) };
+}
+
+function execQmd(args: string[], options: { timeout: number }, callback: Parameters<ExecFileFn>[3]) {
+	return execFileFn(qmdCommand, args, { ...options, env: qmdExecutionEnv() }, callback);
 }
 
 /** Get current qmd availability flag (for testing). */
@@ -665,7 +761,7 @@ export function qmdCollectionInstructions(): string {
 export async function setupQmdCollection(): Promise<boolean> {
 	try {
 		await new Promise<void>((resolve, reject) => {
-			execFileFn("qmd", ["collection", "add", MEMORY_DIR, "--name", "pi-memory"], { timeout: 10_000 }, (err) =>
+			execQmd(["collection", "add", MEMORY_DIR, "--name", "pi-memory"], { timeout: 10_000 }, (err) =>
 				err ? reject(err) : resolve(),
 			);
 		});
@@ -682,7 +778,7 @@ export async function setupQmdCollection(): Promise<boolean> {
 	for (const [ctxPath, desc] of contexts) {
 		try {
 			await new Promise<void>((resolve, reject) => {
-				execFileFn("qmd", ["context", "add", ctxPath, desc, "-c", "pi-memory"], { timeout: 10_000 }, (err) =>
+				execQmd(["context", "add", ctxPath, desc, "-c", "pi-memory"], { timeout: 10_000 }, (err) =>
 					err ? reject(err) : resolve(),
 				);
 			});
@@ -694,23 +790,40 @@ export async function setupQmdCollection(): Promise<boolean> {
 }
 
 export function detectQmd(): Promise<boolean> {
+	const candidates = qmdCandidates();
 	return new Promise((resolve) => {
-		// qmd doesn't reliably support --version; use a fast command that exits 0 when available.
-		execFileFn("qmd", ["status"], { timeout: 5_000 }, (err) => {
-			resolve(!err);
-		});
+		const tryNext = (index: number) => {
+			const candidate = candidates[index];
+			if (!candidate) {
+				qmdCommand = "qmd";
+				resolve(false);
+				return;
+			}
+
+			// qmd doesn't reliably support --version; use a fast command that exits 0 when available.
+			execFileFn(candidate, ["status"], { timeout: 5_000, env: qmdExecutionEnv() }, (err) => {
+				if (!err) {
+					qmdCommand = candidate;
+					resolve(true);
+					return;
+				}
+				tryNext(index + 1);
+			});
+		};
+		tryNext(0);
 	});
 }
 
 export function checkCollection(name: string): Promise<boolean> {
 	return new Promise((resolve) => {
-		execFileFn("qmd", ["collection", "list", "--json"], { timeout: 10_000 }, (err, stdout) => {
+		execQmd(["collection", "list", "--json"], { timeout: 10_000 }, (err, stdout) => {
 			if (err) {
 				resolve(false);
 				return;
 			}
+			const output = stdout.toString();
 			try {
-				const collections = JSON.parse(stdout);
+				const collections = JSON.parse(output);
 				if (Array.isArray(collections)) {
 					resolve(
 						collections.some((entry) => {
@@ -723,11 +836,11 @@ export function checkCollection(name: string): Promise<boolean> {
 					);
 				} else {
 					// qmd may output an object with a collections array or similar
-					resolve(stdout.includes(name));
+					resolve(output.includes(name));
 				}
 			} catch {
 				// Fallback: just check if the name appears in the output
-				resolve(stdout.includes(name));
+				resolve(output.includes(name));
 			}
 		});
 	});
@@ -739,7 +852,7 @@ export function scheduleQmdUpdate() {
 	if (updateTimer) clearTimeout(updateTimer);
 	updateTimer = setTimeout(() => {
 		updateTimer = null;
-		execFileFn("qmd", ["update"], { timeout: 30_000 }, () => {});
+		execQmd(["update"], { timeout: 30_000 }, () => {});
 	}, 500);
 }
 
@@ -747,7 +860,7 @@ async function runQmdUpdateNow() {
 	if (getQmdUpdateMode() !== "background") return;
 	if (!qmdAvailable) return;
 	await new Promise<void>((resolve) => {
-		execFileFn("qmd", ["update"], { timeout: 30_000 }, () => resolve());
+		execQmd(["update"], { timeout: 30_000 }, () => resolve());
 	});
 }
 
@@ -846,15 +959,16 @@ export function runQmdSearch(
 	const args = [subcommand, "--json", "-c", "pi-memory", "-n", String(limit), query];
 
 	return new Promise((resolve, reject) => {
-		execFileFn("qmd", args, { timeout: 60_000 }, (err, stdout, stderr) => {
+		execQmd(args, { timeout: 60_000 }, (err, stdout, stderr) => {
+			const stderrText = stderr?.toString() ?? "";
 			if (err) {
-				reject(new Error(stderr?.trim() || err.message));
+				reject(new Error(stderrText.trim() || err.message));
 				return;
 			}
 			try {
-				const parsed = parseQmdJson(stdout);
+				const parsed = parseQmdJson(stdout.toString());
 				const results = Array.isArray(parsed) ? parsed : ((parsed as any).results ?? (parsed as any).hits ?? []);
-				resolve({ results, stderr: stderr ?? "" });
+				resolve({ results, stderr: stderrText });
 			} catch (parseErr) {
 				if (parseErr instanceof Error) {
 					reject(parseErr);
@@ -872,6 +986,7 @@ export function runQmdSearch(
 
 export default function (pi: ExtensionAPI) {
 	baseMemoryInjectedThisSession = false;
+	pi.registerMessageRenderer("pi-memory.recall", renderMemoryRecall);
 
 	// --- session_start: detect qmd, auto-setup collection ---
 	pi.on("session_start", async (_event, ctx) => {
@@ -963,7 +1078,8 @@ export default function (pi: ExtensionAPI) {
 		baseMemoryInjectedThisSession = true;
 
 		const skipSearch = process.env.PI_MEMORY_NO_SEARCH === "1";
-		const searchResults = skipSearch ? "" : await searchRelevantMemories(event.prompt ?? "");
+		const recallStart = Date.now();
+		const searchResults = skipSearch ? "" : (await runRecallBroker(event.prompt ?? "", 3)) || (await searchRelevantMemories(event.prompt ?? ""));
 		const memoryContext = buildMemoryContext(searchResults);
 		if (!memoryContext) return;
 
@@ -973,7 +1089,7 @@ export default function (pi: ExtensionAPI) {
 			"- Decisions, preferences, and durable facts \u2192 MEMORY.md",
 			"- Day-to-day notes and running context \u2192 daily/<YYYY-MM-DD>.md",
 			"- Things to fix later or keep in mind \u2192 scratchpad tool",
-			"- Use memory_search to find past context across all memory files (keyword, semantic, or deep search).",
+			"- Use memory_search for compact broker packets first; use memory_expand(ref) only when exact source wording is needed.",
 			"- Use #tags (e.g. #decision, #preference) and [[links]] (e.g. [[auth-strategy]]) in memory content to improve future search recall.",
 			'- If someone says "remember this," write it immediately.',
 			"",
@@ -982,6 +1098,20 @@ export default function (pi: ExtensionAPI) {
 
 		return {
 			systemPrompt: event.systemPrompt + memoryInstructions,
+			...(searchResults.trim()
+				? {
+					message: {
+						customType: "pi-memory.recall",
+						content: searchResults,
+						display: true,
+						details: {
+							source: searchResults.includes("Compact memory recall packet") ? "broker" : "qmd",
+							count: (searchResults.match(/^### Result /gm) ?? []).length || undefined,
+							latency_ms: Date.now() - recallStart,
+						},
+					},
+				}
+				: {}),
 		};
 	});
 
@@ -1439,19 +1569,45 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// --- memory_expand tool ---
+	pi.registerTool({
+		name: "memory_expand",
+		label: "Memory Expand",
+		description: "Expand one compact memory recall source ref returned by memory_search. Use only when the summary is insufficient.",
+		parameters: Type.Object({
+			ref: Type.String({ description: "Recall source ref, for example MEMORY.md:10-30 or daily/2026-05-12.md:1-20" }),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			try {
+				const expanded = await expandRecallBrokerRef(params.ref);
+				if (expanded != null) {
+					return {
+						content: [{ type: "text", text: expanded }],
+						details: { ref: params.ref },
+					};
+				}
+				return {
+					content: [{ type: "text", text: "Recall broker is unavailable; cannot expand ref." }],
+					isError: true,
+					details: { ref: params.ref },
+				};
+			} catch (err) {
+				return {
+					content: [{ type: "text", text: `memory_expand error: ${err instanceof Error ? err.message : String(err)}` }],
+					isError: true,
+					details: { ref: params.ref },
+				};
+			}
+		},
+	});
+
 	// --- memory_search tool ---
 	pi.registerTool({
 		name: "memory_search",
 		label: "Memory Search",
 		description:
-			"Search across all memory files (MEMORY.md, SCRATCHPAD.md, daily logs).\n" +
-			"Modes:\n" +
-			"- 'keyword' (default, ~30ms): Fast BM25 search. Best for specific terms, dates, names, #tags, [[links]].\n" +
-			"- 'semantic' (~2s): Meaning-based search. Finds related concepts even with different wording.\n" +
-			"- 'deep' (~10s): Hybrid search with reranking. Use when other modes don't find what you need.\n" +
-			"If semantic/deep warns about missing embeddings, run `qmd embed` once and retry.\n" +
-			"If the first search doesn't find what you need, try rephrasing or switching modes. " +
-			"Keyword mode is best for specific terms; semantic mode finds related concepts even with different wording.",
+			"Search across all memory files using the compact recall broker first. Results return summaries, refs, and memory_expand commands instead of full raw memory text. " +
+			"Mode is accepted for qmd fallback compatibility only; broker recall is the default path.",
 		parameters: Type.Object({
 			query: Type.String({ description: "Search query" }),
 			mode: Type.Optional(
@@ -1462,6 +1618,14 @@ export default function (pi: ExtensionAPI) {
 			limit: Type.Optional(Type.Number({ description: "Max results (default: 5)" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			const brokerLimit = params.limit ?? 5;
+			const brokerResult = await runRecallBroker(params.query, brokerLimit);
+			if (brokerResult) {
+				return {
+					content: [{ type: "text", text: brokerResult }],
+					details: { mode: "broker", query: params.query, count: brokerLimit },
+				};
+			}
 			if (!qmdAvailable) {
 				// Re-check on demand in case qmd was installed after session start.
 				qmdAvailable = await detectQmd();
@@ -1501,10 +1665,10 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const mode = params.mode ?? "keyword";
-			const limit = params.limit ?? 5;
+			const qmdLimit = params.limit ?? 5;
 
 			try {
-				const { results, stderr } = await runQmdSearch(mode, params.query, limit);
+				const { results, stderr } = await runQmdSearch(mode, params.query, qmdLimit);
 				const needsEmbed = /need embeddings/i.test(stderr ?? "");
 
 				if (results.length === 0) {

@@ -52,6 +52,7 @@
 	"peerDependencies": {
 		"@mariozechner/pi-ai": ">=0.0.1",
 		"@mariozechner/pi-coding-agent": ">=0.0.1",
+		"@mariozechner/pi-tui": ">=0.0.1",
 		"@sinclair/typebox": ">=0.34.0"
 	},
 	"overrides": {
