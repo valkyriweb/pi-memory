@@ -98,20 +98,18 @@ export default function piMemoryExtension(pi: ExtensionAPI): void {
 				originSessionId,
 				getTurnCount: () => turnCount,
 				memoryWrittenThisSession: () => journal.memoryWrittenThisSession,
+				// onSaved owns transcript + mutex for both the in-flight run and any
+				// coalesced trailing run, preventing the duplicate "Saved N memories" notification.
+				onSaved: (paths) => {
+					ctx.transcript.append({ kind: "memory_saved", verb: "Saved", paths });
+					journal.memoryWrittenThisSession = true;
+				},
 			});
 		}
 		const force = priorityBumpPending;
 		priorityBumpPending = false;
-		// Fire-and-forget: awaiting here blocks the parent's turn on a 6-30s extraction.
-		// transcript.append is push-based; drain() on session_shutdown catches in-flight forks.
-		void extractor.maybeRun(force).then(
-			(saved) => {
-				if (saved.length === 0) return;
-				ctx.transcript.append({ kind: "memory_saved", verb: "Saved", paths: saved });
-				journal.memoryWrittenThisSession = true;
-			},
-			(err) => console.error("[pi-memory] background extraction failed:", err),
-		);
+		// Fire-and-forget. onSaved handles transcript + mutex for all runs.
+		void extractor.maybeRun(force).catch((err) => console.error("[pi-memory] background extraction failed:", err));
 	});
 
 	pi.on("session_shutdown", async (event, baseCtx) => {

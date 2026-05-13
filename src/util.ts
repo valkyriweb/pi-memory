@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ExtensionContext as BaseCtx } from "@mariozechner/pi-coding-agent";
 export const memoryRoot = (): string => (process.env.PI_MEMORY_DIR?.length ? resolve(process.env.PI_MEMORY_DIR) : join(homedir(), ".pi", "agent", "memory"));
 export const profileDir = (): string => join(memoryRoot(), "profile");
@@ -86,7 +85,12 @@ function memVars(slug: string, originSessionId: string): Record<string, string> 
 	return { PROJECT_SLUG: slug, ORIGIN_SESSION_ID: originSessionId, MEMORY_ROOT: memoryRoot(), PROFILE_DIR: profileDir(), PROJECT_DIR: projectDir(slug) };
 }
 export function buildSavePromptSection(slug: string, originSessionId: string): string {
-	const parts = [`# Memory\n\nYou have a persistent memory system rooted at \`${memoryRoot()}/\`.`, loadPrompt("types-individual.md"), loadPrompt("what-not-to-save.md"), fill(loadPrompt("save-instructions.md"), memVars(slug, originSessionId))];
+	const parts = [
+		`# Memory\n\nYou have a persistent memory system rooted at \`${memoryRoot()}/\`.`,
+		loadPrompt("types-individual.md"),
+		loadPrompt("what-not-to-save.md"),
+		fill(loadPrompt("save-instructions.md"), memVars(slug, originSessionId)),
+	];
 	return parts.join("\n\n");
 }
 export function buildExtractPrompt(o: { newMessageCount: number; existingMemories: string; slug: string; originSessionId: string }): string {
@@ -189,6 +193,10 @@ export function createExtractor(
 		 * firing for the rest of the session. */
 		memoryWrittenThisSession: () => boolean;
 		model?: string;
+		/** Called whenever a fork run saves at least one memory file. Fires for both
+		 * the in-flight run and any coalesced trailing run, so transcript.append is
+		 * always reached regardless of coalescing depth. */
+		onSaved?: (paths: string[]) => void;
 	},
 ): Extractor {
 	let cursorTurns = 0;
@@ -223,6 +231,7 @@ export function createExtractor(
 			const after = snapshot(opts.slug);
 			const changed: string[] = [];
 			for (const [p, t] of after) if (before.get(p) !== t) changed.push(p);
+			if (changed.length > 0) opts.onSaved?.(changed);
 			return changed;
 		} catch (err) {
 			console.error("[pi-memory] fork failed:", err);
@@ -257,7 +266,7 @@ export function createExtractor(
 
 export type TranscriptEntry = { kind: "memory_saved"; verb: "Saved" | "Improved"; paths: string[] };
 export interface ExtensionContext extends BaseCtx {
-	forkAgent(opts: { prompt: string; allowedTools?: string[]; model?: string; signal?: AbortSignal; description?: string }): Promise<{
+	forkAgent(opts: { prompt: string; allowedTools?: string[]; model?: string; signal?: AbortSignal; description?: string; silent?: boolean }): Promise<{
 		handle: { wait(): Promise<unknown>; abort(): Promise<void>; readonly status: unknown };
 		sessionId: string;
 	}>;
