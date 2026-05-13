@@ -1,4 +1,6 @@
 node_modules/
 *.js
 *.d.ts
+!test/bun-test-shim.d.ts
 *.map
+.pi/

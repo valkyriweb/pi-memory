@@ -19,7 +19,7 @@
 		"formatWithErrors": false,
 		"indentStyle": "tab",
 		"indentWidth": 3,
-		"lineWidth": 120
+		"lineWidth": 200
 	},
 	"files": {
 		"includes": ["**/*.ts", "!node_modules", "!.claude", "!coverage"]
