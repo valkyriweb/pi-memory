@@ -90,6 +90,7 @@ export function buildSavePromptSection(slug: string, originSessionId: string): s
 		loadPrompt("types-individual.md"),
 		loadPrompt("what-not-to-save.md"),
 		fill(loadPrompt("save-instructions.md"), memVars(slug, originSessionId)),
+		loadPrompt("recall-guidance.md"),
 	];
 	return parts.join("\n\n");
 }

@@ -1,56 +1,56 @@
 {
-	"name": "pi-memory",
-	"version": "0.4.0",
-	"description": "Pi coding agent extension — prompt-driven memory (claude-code-shaped). Injects typed-memory save instructions + runs a background extraction fork after each turn. Zero tools.",
-	"main": "index.ts",
-	"type": "module",
-	"keywords": [
-		"pi",
-		"pi-coding-agent",
-		"pi-package",
-		"memory",
-		"claude-code"
-	],
-	"pi": {
-		"extensions": [
-			"./index.ts"
-		]
-	},
-	"author": "jayzeng",
-	"license": "MIT",
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/jayzeng/pi-memory.git"
-	},
-	"bugs": {
-		"url": "https://github.com/jayzeng/pi-memory/issues"
-	},
-	"homepage": "https://github.com/jayzeng/pi-memory#readme",
-	"files": [
-		"index.ts",
-		"src",
-		"prompts",
-		"README.md",
-		"LICENSE"
-	],
-	"publishConfig": {
-		"access": "public"
-	},
-	"scripts": {
-		"build": "tsc -p tsconfig.json --noEmit",
-		"lint": "biome check .",
-		"test": "bun test test/unit.test.ts && npx tsx test/e2e.ts",
-		"test:unit": "bun test test/unit.test.ts",
-		"test:e2e": "npx tsx test/e2e.ts"
-	},
-	"devDependencies": {
-		"@biomejs/biome": "^2.4.0",
-		"tsx": "^4.0.0",
-		"typescript": "^5.9.3"
-	},
-	"peerDependencies": {
-		"@earendil-works/pi-agent-core": ">=0.0.1",
-		"@earendil-works/pi-ai": ">=0.0.1",
-		"@earendil-works/pi-coding-agent": ">=0.0.1"
-	}
+  "name": "pi-memory",
+  "version": "0.4.0",
+  "description": "Pi coding agent extension \u2014 prompt-driven memory (claude-code-shaped). Injects typed-memory save instructions + runs a background extraction fork after each turn. Zero tools.",
+  "main": "index.ts",
+  "type": "module",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package",
+    "memory",
+    "claude-code"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/index.mjs"
+    ]
+  },
+  "author": "jayzeng",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jayzeng/pi-memory.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jayzeng/pi-memory/issues"
+  },
+  "homepage": "https://github.com/jayzeng/pi-memory#readme",
+  "files": [
+    "index.ts",
+    "src",
+    "prompts",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "lint": "biome check .",
+    "test": "bun test test/unit.test.ts && npx tsx test/e2e.ts",
+    "test:unit": "bun test test/unit.test.ts",
+    "test:e2e": "npx tsx test/e2e.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": ">=0.0.1",
+    "@earendil-works/pi-ai": ">=0.0.1",
+    "@earendil-works/pi-coding-agent": ">=0.0.1"
+  }
 }
